@@ -2,6 +2,6 @@ extern crate msgio;
 extern crate varint;
 
 mod msg;
-mod multistream;
+mod negotiator;
 
-pub use multistream::MultiStream;
+pub use negotiator::*;
