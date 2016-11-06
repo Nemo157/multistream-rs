@@ -1,5 +1,5 @@
 extern crate msgio;
-extern crate varint;
+extern crate varmint;
 
 mod msg;
 mod negotiator;

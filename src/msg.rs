@@ -1,6 +1,6 @@
 use std::io;
 use msgio::ReadVpm;
-use varint::WriteVarInt;
+use varmint::WriteVarInt;
 
 pub trait ReadMultiStreamMessage {
     fn read_ms_msg(&mut self) -> io::Result<Vec<u8>>;
