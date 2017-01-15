@@ -4,5 +4,6 @@ version = "0.1.0"
 authors = ["Wim Looman <wim@nemo157.com>"]
 
 [dependencies]
-msgio = { path = "../msgio-rs" }
 varmint = "0.1.2"
+futures = "*"
+tokio-core = "*"

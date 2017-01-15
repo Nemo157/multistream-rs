@@ -1,85 +1,85 @@
 use std::io;
+use std::boxed::FnBox;
 
-use msg::{ ReadMultiStreamMessage, WriteMultiStreamMessage };
+use futures::{ future, stream, Future, Sink, Stream };
+use tokio_core::io::{ Io, Framed };
 
-const PROTOCOL_ID: &'static [u8] = b"/multistream/1.0.0";
+use msg::MsgCodec;
 
-#[derive(Debug)]
-pub enum Negotiator<S, R> where S: io::Read + io::Write {
-    Builder {
-        stream: S,
-    },
-    Finished {
-        result: io::Result<R>,
-    },
+const PROTOCOL_ID: &'static [u8] = b"/multistream/1.0.0\n";
+
+pub struct Negotiator<S, R> where S: Io + 'static {
+    transport: Framed<S, MsgCodec>,
+    protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
 }
 
-fn send_header<S>(stream: &mut S) -> io::Result<()> where S: io::Read + io::Write {
-    // Expect the other end to send a multistream header
-    let protocol_id = try!(stream.read_ms_msg());
-    if protocol_id != PROTOCOL_ID {
-        return Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", protocol_id)));
-    }
-    try!(stream.write_ms_msg(PROTOCOL_ID));
-    Ok(())
+fn send_header<S>(transport: Framed<S, MsgCodec>) -> impl Future<Item=Framed<S, MsgCodec>, Error=io::Error> where S: Io {
+    transport.send(PROTOCOL_ID.to_vec())
+        .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
+        .and_then(|(response, transport)| {
+            if let Some(response) = response {
+                if response.as_slice() == PROTOCOL_ID {
+                    Ok(transport)
+                } else {
+                    Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", String::from_utf8_lossy(response.as_slice()))))
+                }
+            } else {
+                Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
+            }
+        })
 }
 
-fn negotiate<S>(stream: &mut S, protocol: &'static [u8]) -> io::Result<bool> where S: io::Read + io::Write {
+fn negotiate<S>(transport: Framed<S, MsgCodec>, protocol: &'static [u8]) -> impl Future<Item=(bool, Framed<S, MsgCodec>), Error=io::Error> where S: Io {
     println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
-    try!(stream.write_ms_msg(&protocol));
-    let response = try!(stream.read_ms_msg());
-    if &response[..] == &protocol[..] {
-        println!("Negotiated multistream protocol {}", String::from_utf8_lossy(&*protocol));
-        Ok(true)
-    } else if response == b"na" {
-        println!("Server denied multistream protocol {}", String::from_utf8_lossy(&*protocol));
-        Ok(false)
-    } else {
-        println!("Server returned unexpected response {}", String::from_utf8_lossy(&*response));
-        Err(io::Error::new(io::ErrorKind::Other, "Unexpected response while negotiating multistream"))
-    }
+    let mut bytes = protocol.to_vec();
+    bytes.push(b'\n');
+    transport.send(bytes)
+        .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
+        .and_then(move |(response, transport)| {
+            if let Some(response) = response {
+                if response.as_slice() == protocol {
+                    println!("Negotiated multistream protocol {}", String::from_utf8_lossy(protocol));
+                    Ok((true, transport))
+                } else if response.as_slice() == b"na" {
+                    println!("Server denied multistream protocol {}", String::from_utf8_lossy(protocol));
+                    Ok((false, transport))
+                } else {
+                    println!("Server returned unexpected response {}", String::from_utf8_lossy(response.as_slice()));
+                    Err(io::Error::new(io::ErrorKind::Other, "Unexpected response while negotiating multistream"))
+                }
+            } else {
+                println!("Server unexpectedly closed the connection");
+                Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
+            }
+        })
 }
 
-impl<S, R> Negotiator<S, R> where S: io::Read + io::Write {
-    pub fn start(mut stream: S) -> Negotiator<S, R> {
-        match send_header(&mut stream) {
-            Ok(()) => Negotiator::Builder { stream: stream },
-            Err(err) => Negotiator::Finished { result: Err(err) },
-        }
+impl<S, R> Negotiator<S, R> where S: Io, R: 'static {
+    pub fn start(transport: S) -> Negotiator<S, R> {
+        Negotiator { transport: transport.framed(MsgCodec), protocols: Vec::new() }
     }
 
-    pub fn negotiate<F>(self, protocol: &'static [u8], callback: F) -> Negotiator<S, R> where F: FnOnce(S) -> io::Result<R> {
-        match self {
-            Negotiator::Builder { mut stream } => {
-                match negotiate(&mut stream, protocol) {
-                    Ok(true) => Negotiator::Finished { result: callback(stream) },
-                    Ok(false) => Negotiator::Builder { stream: stream },
-                    Err(err) => Negotiator::Finished { result: Err(err) },
-                }
-            }
-            Negotiator::Finished { .. } => self
-        }
+    pub fn negotiate<F>(mut self, protocol: &'static [u8], callback: F) -> Self where F: FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static {
+        self.protocols.push((protocol, Box::new(callback)));
+        self
     }
 
-    pub fn ls(&mut self) -> io::Result<Vec<String>> {
-        match *self {
-            Negotiator::Builder { ref mut stream } => {
-                try!(stream.write_ms_msg(b"ls"));
-                let mut response: &[u8] = &try!(stream.read_ms_msg());
-                let mut protocols = Vec::new();
-                while let Some(protocol) = try!(response.try_read_ms_msg()) {
-                    protocols.push(String::from_utf8_lossy(&*protocol).into_owned());
-                }
-                Ok(protocols)
-            }
-            Negotiator::Finished { .. } => Err(io::Error::new(io::ErrorKind::Other, "Cannot ls on a finished multistream negotiator"))
-        }
-    }
-
-    pub fn finish(self) -> io::Result<R> {
-        match self {
-            Negotiator::Builder { .. } => Err(io::Error::new(io::ErrorKind::Other, "Did not successfully negotiate any connection")),
-            Negotiator::Finished { result } => result,
-        }
+    pub fn finish(self) -> impl Future<Item=R, Error=io::Error> {
+        let Negotiator { transport, protocols } = self;
+        send_header(transport)
+            .and_then(move |transport| stream::iter(protocols.into_iter().map(Ok))
+                .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=Result<R, Framed<S, MsgCodec>>, Error=io::Error>> {
+                    match result {
+                        Ok(result) => Box::new(future::ok(Ok(result))),
+                        Err(transport) => Box::new(negotiate(transport, protocol).and_then(move |(success, transport)| -> Box<Future<Item=Result<R, Framed<S, MsgCodec>>, Error=io::Error>> {
+                            if success {
+                                Box::new(callback(transport.into_inner()).map(Ok))
+                            } else {
+                                Box::new(future::ok(Err(transport)))
+                            }
+                        })),
+                    }
+                })
+                .and_then(|result| result.map_err(|_| io::Error::new(io::ErrorKind::Other, "No protocol was negotiated"))))
     }
 }

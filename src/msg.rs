@@ -1,42 +1,40 @@
-use std::io;
-use msgio::ReadVpm;
-use varmint::WriteVarInt;
+use std::io::{ self, Cursor };
 
-pub trait ReadMultiStreamMessage {
-    fn read_ms_msg(&mut self) -> io::Result<Vec<u8>>;
-    fn try_read_ms_msg(&mut self) -> io::Result<Option<Vec<u8>>>;
-}
+use varmint::{ ReadVarInt, WriteVarInt };
+use tokio_core::io::{ Codec, EasyBuf };
 
-pub trait WriteMultiStreamMessage {
-    fn write_ms_msg(&mut self, msg: &[u8]) -> io::Result<()>;
-}
+pub struct MsgCodec;
 
-impl<R> ReadMultiStreamMessage for R where R: io::Read {
-    fn read_ms_msg(&mut self) -> io::Result<Vec<u8>> {
-        let mut msg = try!(self.read_vpm());
-        if msg.pop() != Some(b'\n') {
-            return Err(io::Error::new(io::ErrorKind::Other, "message did not end with '\\n'"));
-        }
-        Ok(msg)
-    }
+impl Codec for MsgCodec {
+    type In = EasyBuf;
+    type Out = Vec<u8>;
 
-    fn try_read_ms_msg(&mut self) -> io::Result<Option<Vec<u8>>> {
-        if let Some(mut msg) = try!(self.try_read_vpm()) {
-            if msg.pop() != Some(b'\n') {
-                return Err(io::Error::new(io::ErrorKind::Other, "message did not end with '\\n'"));
+    fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
+        let (len, len_len) = {
+            let mut cursor = Cursor::new(&buf);
+            (cursor.try_read_usize_varint()?, cursor.position() as usize)
+        };
+        if let Some(len) = len {
+            if len + len_len < buf.len() {
+                buf.drain_to(len_len); // discard the length
+                let mut msg = buf.drain_to(len);
+                if msg.as_slice()[len - 1] == b'\n' {
+                    Ok(Some(msg.drain_to(len - 1)))
+                } else {
+                    Err(io::Error::new(io::ErrorKind::Other, "message did not end with '\\n'"))
+                }
+            } else {
+                Ok(None)
             }
-            Ok(Some(msg))
         } else {
             Ok(None)
         }
     }
-}
 
-impl<W> WriteMultiStreamMessage for W where W: io::Write {
-    fn write_ms_msg(&mut self, msg: &[u8]) -> io::Result<()> {
-        try!(self.write_usize_varint(msg.len() + 1));
-        try!(self.write_all(msg));
-        try!(self.write_all(b"\n"));
+    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.write_usize_varint(msg.len() + 1)?;
+        buf.extend_from_slice(&msg);
+        buf.push(b'\n');
         Ok(())
     }
 }
