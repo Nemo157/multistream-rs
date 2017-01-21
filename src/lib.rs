@@ -4,8 +4,8 @@
 extern crate varmint;
 extern crate futures;
 extern crate tokio_core;
+extern crate msgio;
 
-mod msg;
 mod negotiator;
 
 pub use negotiator::*;

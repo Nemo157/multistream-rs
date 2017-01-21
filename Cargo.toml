@@ -7,3 +7,4 @@ authors = ["Wim Looman <wim@nemo157.com>"]
 varmint = "0.1.2"
 futures = "*"
 tokio-core = "*"
+msgio = { path = "../msgio-rs" }
