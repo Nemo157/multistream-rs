@@ -53,7 +53,10 @@ fn negotiate<S>(transport: Framed<S, msgio::Codec>, protocol: &'static [u8]) -> 
 
 impl<S, R> Negotiator<S, R> where S: Io, R: 'static {
     pub fn start(transport: S) -> Negotiator<S, R> {
-        Negotiator { transport: transport.framed(msgio::Codec(msgio::Prefix::VarInt, msgio::Suffix::NewLine)), protocols: Vec::new() }
+        Negotiator {
+            transport: transport.framed(msgio::Codec(msgio::Prefix::VarInt, msgio::Suffix::NewLine)),
+            protocols: Vec::new(),
+        }
     }
 
     pub fn negotiate<F>(mut self, protocol: &'static [u8], callback: F) -> Self where F: FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static {
@@ -65,16 +68,17 @@ impl<S, R> Negotiator<S, R> where S: Io, R: 'static {
         let Negotiator { transport, protocols } = self;
         send_header(transport)
             .and_then(move |transport| stream::iter(protocols.into_iter().map(Ok))
-                .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=Result<R, Framed<S, msgio::Codec>>, Error=io::Error>> {
+                .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_>> {
                     match result {
                         Ok(result) => Box::new(future::ok(Ok(result))),
-                        Err(transport) => Box::new(negotiate(transport, protocol).and_then(move |(success, transport)| -> Box<Future<Item=Result<R, Framed<S, msgio::Codec>>, Error=io::Error>> {
-                            if success {
-                                Box::new(callback(transport.into_inner()).map(Ok))
-                            } else {
-                                Box::new(future::ok(Err(transport)))
-                            }
-                        })),
+                        Err(transport) => Box::new(negotiate(transport, protocol)
+                            .and_then(move |(success, transport)| -> Box<Future<Item=_, Error=_>> {
+                                if success {
+                                    Box::new(callback(transport.into_inner()).map(Ok))
+                                } else {
+                                    Box::new(future::ok(Err(transport)))
+                                }
+                            })),
                     }
                 })
                 .and_then(|result| result.map_err(|_| io::Error::new(io::ErrorKind::Other, "No protocol was negotiated"))))
