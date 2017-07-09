@@ -5,5 +5,4 @@ authors = ["Wim Looman <wim@nemo157.com>"]
 
 [dependencies]
 futures = "*"
-tokio-core = "*"
 msgio = { path = "../msgio-rs" }

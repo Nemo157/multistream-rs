@@ -1,18 +1,17 @@
 use std::io;
 use std::boxed::FnBox;
 
-use futures::{ future, stream, Future, Sink, Stream };
-use tokio_core::io::{ Io, Framed };
-use msgio;
+use futures::{ future, stream, Future, Stream };
+use msgio::MsgIo;
 
 const PROTOCOL_ID: &'static [u8] = b"/multistream/1.0.0";
 
-pub struct Negotiator<S, R> where S: Io + 'static {
-    transport: Framed<S, msgio::Codec>,
+pub struct Negotiator<S: MsgIo + 'static, R: 'static> {
+    transport: S,
     protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
 }
 
-fn send_header<S>(transport: Framed<S, msgio::Codec>) -> impl Future<Item=Framed<S, msgio::Codec>, Error=io::Error> where S: Io {
+fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io::Error> {
     transport.send(PROTOCOL_ID.to_vec())
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(|(response, transport)| {
@@ -28,7 +27,7 @@ fn send_header<S>(transport: Framed<S, msgio::Codec>) -> impl Future<Item=Framed
         })
 }
 
-fn negotiate<S>(transport: Framed<S, msgio::Codec>, protocol: &'static [u8]) -> impl Future<Item=(bool, Framed<S, msgio::Codec>), Error=io::Error> where S: Io {
+fn negotiate<S: MsgIo + 'static>(transport: S, protocol: &'static [u8]) -> impl Future<Item=(bool, S), Error=io::Error> {
     println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
     transport.send(protocol.to_vec())
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
@@ -51,10 +50,10 @@ fn negotiate<S>(transport: Framed<S, msgio::Codec>, protocol: &'static [u8]) -> 
         })
 }
 
-impl<S, R> Negotiator<S, R> where S: Io, R: 'static {
+impl<S: MsgIo + 'static, R: 'static> Negotiator<S, R> {
     pub fn start(transport: S) -> Negotiator<S, R> {
         Negotiator {
-            transport: transport.framed(msgio::Codec(msgio::Prefix::VarInt, msgio::Suffix::NewLine)),
+            transport: transport,
             protocols: Vec::new(),
         }
     }
@@ -68,13 +67,13 @@ impl<S, R> Negotiator<S, R> where S: Io, R: 'static {
         let Negotiator { transport, protocols } = self;
         send_header(transport)
             .and_then(move |transport| stream::iter(protocols.into_iter().map(Ok))
-                .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_>> {
+                .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_> + 'static> {
                     match result {
                         Ok(result) => Box::new(future::ok(Ok(result))),
                         Err(transport) => Box::new(negotiate(transport, protocol)
-                            .and_then(move |(success, transport)| -> Box<Future<Item=_, Error=_>> {
+                            .and_then(move |(success, transport)| -> Box<Future<Item=_, Error=_> + 'static> {
                                 if success {
-                                    Box::new(callback(transport.into_inner()).map(Ok))
+                                    Box::new(callback(transport).map(Ok))
                                 } else {
                                     Box::new(future::ok(Err(transport)))
                                 }
