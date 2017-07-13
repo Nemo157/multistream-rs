@@ -1,6 +1,7 @@
 use std::io;
 use std::boxed::FnBox;
 
+use bytes::BytesMut;
 use futures::{ future, stream, Future, Stream };
 use msgio::MsgIo;
 
@@ -12,14 +13,14 @@ pub struct Negotiator<S: MsgIo + 'static, R: 'static> {
 }
 
 fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io::Error> {
-    transport.send(PROTOCOL_ID.to_vec())
+    transport.send(BytesMut::from(PROTOCOL_ID))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(|(response, transport)| {
             if let Some(response) = response {
-                if response.as_slice() == PROTOCOL_ID {
+                if response == PROTOCOL_ID {
                     Ok(transport)
                 } else {
-                    Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", String::from_utf8_lossy(response.as_slice()))))
+                    Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", String::from_utf8_lossy(&response))))
                 }
             } else {
                 Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
@@ -29,18 +30,18 @@ fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io
 
 fn negotiate<S: MsgIo + 'static>(transport: S, protocol: &'static [u8]) -> impl Future<Item=(bool, S), Error=io::Error> {
     println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
-    transport.send(protocol.to_vec())
+    transport.send(BytesMut::from(protocol))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(move |(response, transport)| {
             if let Some(response) = response {
-                if response.as_slice() == protocol {
+                if response == protocol {
                     println!("Negotiated multistream protocol {}", String::from_utf8_lossy(protocol));
                     Ok((true, transport))
-                } else if response.as_slice() == b"na" {
+                } else if response == &b"na"[..] {
                     println!("Server denied multistream protocol {}", String::from_utf8_lossy(protocol));
                     Ok((false, transport))
                 } else {
-                    println!("Server returned unexpected response {}", String::from_utf8_lossy(response.as_slice()));
+                    println!("Server returned unexpected response {}", String::from_utf8_lossy(&response));
                     Err(io::Error::new(io::ErrorKind::Other, "Unexpected response while negotiating multistream"))
                 }
             } else {

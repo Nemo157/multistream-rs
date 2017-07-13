@@ -3,6 +3,7 @@
 
 extern crate futures;
 extern crate msgio;
+extern crate bytes;
 
 mod negotiator;
 

@@ -1,8 +1,11 @@
 [package]
+authors = ["Wim Looman <wim@nemo157.com>"]
 name = "multistream"
 version = "0.1.0"
-authors = ["Wim Looman <wim@nemo157.com>"]
 
 [dependencies]
+bytes = "0.4.4"
 futures = "*"
-msgio = { path = "../msgio-rs" }
+
+[dependencies.msgio]
+path = "../msgio-rs"
