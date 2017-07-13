@@ -1,7 +1,7 @@
 use std::io;
 use std::boxed::FnBox;
 
-use bytes::BytesMut;
+use bytes::Bytes;
 use futures::{ future, stream, Future, Stream };
 use msgio::MsgIo;
 
@@ -13,7 +13,7 @@ pub struct Negotiator<S: MsgIo + 'static, R: 'static> {
 }
 
 fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io::Error> {
-    transport.send(BytesMut::from(PROTOCOL_ID))
+    transport.send(Bytes::from(PROTOCOL_ID))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(|(response, transport)| {
             if let Some(response) = response {
@@ -30,7 +30,7 @@ fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io
 
 fn negotiate<S: MsgIo + 'static>(transport: S, protocol: &'static [u8]) -> impl Future<Item=(bool, S), Error=io::Error> {
     println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
-    transport.send(BytesMut::from(protocol))
+    transport.send(Bytes::from(protocol))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(move |(response, transport)| {
             if let Some(response) = response {
