@@ -5,6 +5,7 @@
 extern crate futures;
 extern crate msgio;
 extern crate bytes;
+extern crate tokio_io;
 
 mod negotiator;
 

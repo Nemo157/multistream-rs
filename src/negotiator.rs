@@ -3,41 +3,43 @@ use std::io;
 use std::mem;
 
 use bytes::Bytes;
-use futures::{ future, stream, Future, Stream, Poll, Async };
+use futures::{ future, stream, Future, Stream, Sink, Poll, Async };
 use futures::sink::Send;
-use msgio::MsgIo;
+use msgio::{Codec, LengthPrefixed, Prefix, Suffix, Stacked, Identity};
+use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_io::codec::{Framed, FramedParts};
 
 const PROTOCOL_ID: &'static [u8] = b"/multistream/1.0.0";
 
-pub struct Negotiator<S: MsgIo + 'static, R: 'static> {
+pub struct Negotiator<S: AsyncRead + AsyncWrite + 'static, T: Codec, R: 'static> {
     initiator: bool,
-    transport: S,
-    protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    transport: Framed<S, Stacked<LengthPrefixed, T>>,
+    protocols: Vec<(&'static [u8], Box<FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
 }
 
-enum AcceptorState<S: MsgIo + 'static, R: 'static> {
+enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static> {
     Invalid,
     Ready {
-        transport: S,
+        transport: Framed<S, Stacked<LengthPrefixed, T>>,
     },
     Denying {
-        sending: Send<S>,
+        sending: Send<Framed<S, Stacked<LengthPrefixed, T>>>,
     },
     Accepting {
-        sending: Send<S>,
-        callback: Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>,
+        sending: Send<Framed<S, Stacked<LengthPrefixed, T>>>,
+        callback: Box<FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static>,
     },
     Wrapping {
         wrapping: Box<Future<Item=R, Error=io::Error>>,
     },
 }
 
-pub struct Acceptor<S: MsgIo + 'static, R: 'static> {
-    protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
-    state: AcceptorState<S, R>,
+pub struct Acceptor<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static> {
+    protocols: Vec<(&'static [u8], Box<FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    state: AcceptorState<S, T, R>,
 }
 
-fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io::Error> {
+fn send_header<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static>(transport: Framed<S, Stacked<LengthPrefixed, T>>) -> impl Future<Item=Framed<S, Stacked<LengthPrefixed, T>>, Error=io::Error> {
     transport.send(Bytes::from(PROTOCOL_ID))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(|(response, transport)| {
@@ -53,7 +55,7 @@ fn send_header<S: MsgIo + 'static>(transport: S) -> impl Future<Item=S, Error=io
         })
 }
 
-fn negotiate<S: MsgIo + 'static>(transport: S, protocol: &'static [u8]) -> impl Future<Item=(bool, S), Error=io::Error> {
+fn negotiate<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static>(transport: Framed<S, Stacked<LengthPrefixed, T>>, protocol: &'static [u8]) -> impl Future<Item=(bool, Framed<S, Stacked<LengthPrefixed, T>>), Error=io::Error> {
     println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
     transport.send(Bytes::from(protocol))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
@@ -76,7 +78,7 @@ fn negotiate<S: MsgIo + 'static>(transport: S, protocol: &'static [u8]) -> impl 
         })
 }
 
-fn negotiate_all<S: MsgIo + 'static, R: 'static>(transport: S, protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
+fn negotiate_all<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static>(transport: Framed<S, Stacked<LengthPrefixed, T>>, protocols: Vec<(&'static [u8], Box<FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
     stream::iter(protocols.into_iter().map(Ok))
         .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_> + 'static> {
             match result {
@@ -84,7 +86,9 @@ fn negotiate_all<S: MsgIo + 'static, R: 'static>(transport: S, protocols: Vec<(&
                 Err(transport) => Box::new(negotiate(transport, protocol)
                     .and_then(move |(success, transport)| -> Box<Future<Item=_, Error=_> + 'static> {
                         if success {
-                            Box::new(callback(transport).map(Ok))
+                            let (parts, codec) = transport.into_parts_and_codec();
+                            let (_, codec) = codec.split();
+                            Box::new(callback((parts, codec)).map(Ok))
                         } else {
                             Box::new(future::ok(Err(transport)))
                         }
@@ -94,13 +98,25 @@ fn negotiate_all<S: MsgIo + 'static, R: 'static>(transport: S, protocols: Vec<(&
         .and_then(|result| result.map_err(|_| io::Error::new(io::ErrorKind::Other, "No protocol was negotiated")))
 }
 
-impl<S: MsgIo + 'static, R: 'static> Negotiator<S, R> {
-    pub fn start(transport: S, initiator: bool) -> Negotiator<S, R> {
+impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<S, Identity, R> {
+    pub fn start(transport: S, initiator: bool) -> Negotiator<S, Identity, R> {
         let protocols = Vec::new();
+        let codec = Identity.stack(LengthPrefixed(Prefix::VarInt, Suffix::NewLine));
+        let transport = transport.framed(codec);
+        Negotiator { initiator, transport, protocols }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static> Negotiator<S, T, R> {
+    pub fn start_framed(transport: Framed<S, T>, initiator: bool) -> Negotiator<S, T, R> {
+        let protocols = Vec::new();
+        let (parts, codec) = transport.into_parts_and_codec();
+        let codec = codec.stack(LengthPrefixed(Prefix::VarInt, Suffix::NewLine));
+        let transport = Framed::from_parts(parts, codec);
         Negotiator { initiator, transport, protocols }
     }
 
-    pub fn negotiate<F>(mut self, protocol: &'static [u8], callback: F) -> Self where F: FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static {
+    pub fn negotiate<F>(mut self, protocol: &'static [u8], callback: F) -> Self where F: FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static {
         self.protocols.push((protocol, Box::new(callback)));
         self
     }
@@ -119,8 +135,8 @@ impl<S: MsgIo + 'static, R: 'static> Negotiator<S, R> {
     }
 }
 
-impl<S: MsgIo + 'static, R: 'static> Acceptor<S, R> {
-    fn new(transport: S, protocols: Vec<(&'static [u8], Box<FnBox(S) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<S, R> {
+impl<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static> Acceptor<S, T, R> {
+    fn new(transport: Framed<S, Stacked<LengthPrefixed, T>>, protocols: Vec<(&'static [u8], Box<FnBox((FramedParts<S>, T)) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<S, T, R> {
         Acceptor {
             state: AcceptorState::Ready { transport },
             protocols: protocols,
@@ -128,7 +144,7 @@ impl<S: MsgIo + 'static, R: 'static> Acceptor<S, R> {
     }
 }
 
-impl<S: MsgIo + 'static, R: 'static> Future for Acceptor<S, R> {
+impl<S: AsyncRead + AsyncWrite + 'static, T: Codec + 'static, R: 'static> Future for Acceptor<S, T, R> {
     type Item = R;
     type Error = io::Error;
 
@@ -192,8 +208,10 @@ impl<S: MsgIo + 'static, R: 'static> Future for Acceptor<S, R> {
                 AcceptorState::Accepting { mut sending, callback } => {
                     match sending.poll()? {
                         Async::Ready(transport) => {
+                            let (parts, codec) = transport.into_parts_and_codec();
+                            let (_, codec) = codec.split();
                             self.state = AcceptorState::Wrapping {
-                                wrapping: callback(transport),
+                                wrapping: callback((parts, codec)),
                             };
                         }
                         Async::NotReady => {
