@@ -1,6 +1,7 @@
 use std::boxed::FnBox;
 use std::io;
 use std::mem;
+use std::str;
 
 use bytes::Bytes;
 use futures::{ future, stream, Future, Stream, Sink, Poll, Async };
@@ -9,12 +10,12 @@ use msgio::{LengthPrefixed, Prefix, Suffix};
 use tokio_io::{AsyncRead, AsyncWrite};
 use tokio_io::codec::{Framed, FramedParts};
 
-const PROTOCOL_ID: &'static [u8] = b"/multistream/1.0.0";
+const PROTOCOL_ID: &'static str = "/multistream/1.0.0";
 
 pub struct Negotiator<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     initiator: bool,
     transport: Framed<S, LengthPrefixed>,
-    protocols: Vec<(&'static [u8], Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
 }
 
 enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
@@ -35,7 +36,7 @@ enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
 }
 
 pub struct Acceptor<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
-    protocols: Vec<(&'static [u8], Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
     state: AcceptorState<S, R>,
 }
 
@@ -43,42 +44,47 @@ fn send_header<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthP
     transport.send(Bytes::from(PROTOCOL_ID))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(|(response, transport)| {
-            if let Some(response) = response {
-                if response == PROTOCOL_ID {
+            match response.as_ref().map(|b| str::from_utf8(b)) {
+                Some(Ok(response)) => if response == PROTOCOL_ID  {
                     Ok(transport)
                 } else {
-                    Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", String::from_utf8_lossy(&response))))
-                }
-            } else {
-                Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
+                    Err(io::Error::new(io::ErrorKind::Other, format!("Server requested unknown multistream protocol {:?}", response)))
+                },
+                Some(Err(e)) => Err(io::Error::new(io::ErrorKind::InvalidData, e)),
+                None => Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection")),
             }
         })
 }
 
-fn negotiate<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthPrefixed>, protocol: &'static [u8]) -> impl Future<Item=(bool, Framed<S, LengthPrefixed>), Error=io::Error> {
-    println!("Attempting to negotiate multistream protocol {}", String::from_utf8_lossy(&*protocol));
+fn negotiate<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthPrefixed>, protocol: &'static str) -> impl Future<Item=(bool, Framed<S, LengthPrefixed>), Error=io::Error> {
+    println!("Attempting to negotiate multistream protocol {}", protocol);
     transport.send(Bytes::from(protocol))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(move |(response, transport)| {
-            if let Some(response) = response {
-                if response == protocol {
-                    println!("Negotiated multistream protocol {}", String::from_utf8_lossy(protocol));
+            match response.as_ref().map(|b| str::from_utf8(b)) {
+                Some(Ok(response)) => if response == protocol {
+                    println!("Negotiated multistream protocol {}", protocol);
                     Ok((true, transport))
-                } else if response == &b"na"[..] {
-                    println!("Server denied multistream protocol {}", String::from_utf8_lossy(protocol));
+                } else if response == "na" {
+                    println!("Server denied multistream protocol {}", protocol);
                     Ok((false, transport))
                 } else {
-                    println!("Server returned unexpected response {}", String::from_utf8_lossy(&response));
+                    println!("Server returned unexpected response {}", response);
                     Err(io::Error::new(io::ErrorKind::Other, "Unexpected response while negotiating multistream"))
+                },
+                Some(Err(e)) => {
+                    println!("Server sent non-utf8 message");
+                    Err(io::Error::new(io::ErrorKind::InvalidData, e))
                 }
-            } else {
-                println!("Server unexpectedly closed the connection");
-                Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
+                None => {
+                    println!("Server unexpectedly closed the connection");
+                    Err(io::Error::new(io::ErrorKind::Other, "Server unexpectedly closed the connection"))
+                }
             }
         })
 }
 
-fn negotiate_all<S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static [u8], Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
+fn negotiate_all<S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
     stream::iter(protocols.into_iter().map(Ok))
         .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_> + 'static> {
             match result {
@@ -103,7 +109,7 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<S, R> {
         Negotiator { initiator, transport, protocols }
     }
 
-    pub fn negotiate<F>(mut self, protocol: &'static [u8], callback: F) -> Self where F: FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static {
+    pub fn negotiate<F>(mut self, protocol: &'static str, callback: F) -> Self where F: FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static {
         self.protocols.push((protocol, Box::new(callback)));
         self
     }
@@ -123,7 +129,7 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<S, R> {
 }
 
 impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<S, R> {
-    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static [u8], Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<S, R> {
+    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<S, R> {
         Acceptor {
             state: AcceptorState::Ready { transport },
             protocols: protocols,
@@ -163,23 +169,29 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Future for Acceptor<S, R> 
                 AcceptorState::Ready { mut transport } => {
                     match transport.poll()? {
                         Async::Ready(Some(message)) => {
-                            if let Some(i) = self.protocols.iter().position(|&(p, _)| p == message) {
-                                let (protocol, callback) = self.protocols.swap_remove(i);
-                                println!("Negotiated multistream protocol {}", String::from_utf8_lossy(protocol));
-                                self.state = AcceptorState::Accepting {
-                                    sending: transport.send(Bytes::from(protocol)),
-                                    callback,
-                                };
-                                continue;
-                            } else if message == &b"ls"[..] {
-                                println!("TODO: Server requested ls");
-                                return Err(io::Error::new(io::ErrorKind::Other, "TODO: Server requested ls"));
-                            } else {
-                                println!("Server asked for unknown protocol {}", String::from_utf8_lossy(&message));
-                                self.state = AcceptorState::Denying {
-                                    sending: transport.send(Bytes::from(&b"na"[..])),
-                                };
-                                continue;
+                            match str::from_utf8(&message) {
+                                Ok(message) => if let Some(i) = self.protocols.iter().position(|&(p, _)| p == message) {
+                                    let (protocol, callback) = self.protocols.swap_remove(i);
+                                    println!("Negotiated multistream protocol {}", protocol);
+                                    self.state = AcceptorState::Accepting {
+                                        sending: transport.send(Bytes::from(protocol)),
+                                        callback,
+                                    };
+                                    continue;
+                                } else if message == "ls" {
+                                    println!("TODO: Server requested ls");
+                                    return Err(io::Error::new(io::ErrorKind::Other, "TODO: Server requested ls"));
+                                } else {
+                                    println!("Server asked for unknown protocol {}", message);
+                                    self.state = AcceptorState::Denying {
+                                        sending: transport.send(Bytes::from(&b"na"[..])),
+                                    };
+                                    continue;
+                                }
+                                Err(e) => {
+                                    println!("Server requested non-utf8 protocol");
+                                    return Err(io::Error::new(io::ErrorKind::InvalidData, e));
+                                }
                             }
                         }
                         Async::Ready(None) => {
