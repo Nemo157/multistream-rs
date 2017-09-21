@@ -12,10 +12,10 @@ use tokio_io::codec::{Framed, FramedParts};
 
 const PROTOCOL_ID: &'static str = "/multistream/1.0.0";
 
-pub struct Negotiator<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
+pub struct Negotiator<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     initiator: bool,
     transport: Framed<S, LengthPrefixed>,
-    protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
 }
 
 enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
@@ -35,8 +35,8 @@ enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     },
 }
 
-pub struct Acceptor<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
-    protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+pub struct Acceptor<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
+    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
     state: AcceptorState<S, R>,
 }
 
@@ -56,17 +56,17 @@ fn send_header<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthP
         })
 }
 
-fn negotiate<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthPrefixed>, protocol: &'static str) -> impl Future<Item=(bool, Framed<S, LengthPrefixed>), Error=io::Error> {
-    println!("Attempting to negotiate multistream protocol {}", protocol);
-    transport.send(Bytes::from(protocol))
+fn negotiate<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthPrefixed>, protocol: P) -> impl Future<Item=(bool, Framed<S, LengthPrefixed>), Error=io::Error> {
+    println!("Attempting to negotiate multistream protocol {}", protocol.as_ref());
+    transport.send(Bytes::from(protocol.as_ref()))
         .and_then(|transport| transport.into_future().map_err(|(error, _stream)| error))
         .and_then(move |(response, transport)| {
             match response.as_ref().map(|b| str::from_utf8(b)) {
-                Some(Ok(response)) => if response == protocol {
-                    println!("Negotiated multistream protocol {}", protocol);
+                Some(Ok(response)) => if response == protocol.as_ref() {
+                    println!("Negotiated multistream protocol {}", protocol.as_ref());
                     Ok((true, transport))
                 } else if response == "na" {
-                    println!("Server denied multistream protocol {}", protocol);
+                    println!("Server denied multistream protocol {}", protocol.as_ref());
                     Ok((false, transport))
                 } else {
                     println!("Server returned unexpected response {}", response);
@@ -84,7 +84,7 @@ fn negotiate<S: AsyncRead + AsyncWrite + 'static>(transport: Framed<S, LengthPre
         })
 }
 
-fn negotiate_all<S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
+fn negotiate_all<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
     stream::iter(protocols.into_iter().map(Ok))
         .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_> + 'static> {
             match result {
@@ -102,14 +102,14 @@ fn negotiate_all<S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Fra
         .and_then(|result| result.map_err(|_| io::Error::new(io::ErrorKind::Other, "No protocol was negotiated")))
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<S, R> {
-    pub fn start(transport: S, initiator: bool) -> Negotiator<S, R> {
+impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<P, S, R> {
+    pub fn start(transport: S, initiator: bool) -> Negotiator<P, S, R> {
         let protocols = Vec::new();
         let transport = transport.framed(LengthPrefixed(Prefix::VarInt, Suffix::NewLine));
         Negotiator { initiator, transport, protocols }
     }
 
-    pub fn negotiate<F>(mut self, protocol: &'static str, callback: F) -> Self where F: FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static {
+    pub fn negotiate<F>(mut self, protocol: P, callback: F) -> Self where F: FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static {
         self.protocols.push((protocol, Box::new(callback)));
         self
     }
@@ -128,8 +128,8 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Negotiator<S, R> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<S, R> {
-    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(&'static str, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<S, R> {
+impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<P, S, R> {
+    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<P, S, R> {
         Acceptor {
             state: AcceptorState::Ready { transport },
             protocols: protocols,
@@ -137,7 +137,7 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<S, R> {
     }
 }
 
-impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Future for Acceptor<S, R> {
+impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Future for Acceptor<P, S, R> {
     type Item = R;
     type Error = io::Error;
 
@@ -170,11 +170,11 @@ impl<S: AsyncRead + AsyncWrite + 'static, R: 'static> Future for Acceptor<S, R> 
                     match transport.poll()? {
                         Async::Ready(Some(message)) => {
                             match str::from_utf8(&message) {
-                                Ok(message) => if let Some(i) = self.protocols.iter().position(|&(p, _)| p == message) {
+                                Ok(message) => if let Some(i) = self.protocols.iter().position(|&(ref p, _)| p.as_ref() == message) {
                                     let (protocol, callback) = self.protocols.swap_remove(i);
-                                    println!("Negotiated multistream protocol {}", protocol);
+                                    println!("Negotiated multistream protocol {}", protocol.as_ref());
                                     self.state = AcceptorState::Accepting {
-                                        sending: transport.send(Bytes::from(protocol)),
+                                        sending: transport.send(Bytes::from(protocol.as_ref())),
                                         callback,
                                     };
                                     continue;
