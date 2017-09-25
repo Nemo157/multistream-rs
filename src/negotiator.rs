@@ -15,7 +15,7 @@ const PROTOCOL_ID: &'static str = "/multistream/1.0.0";
 pub struct Negotiator<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     initiator: bool,
     transport: Framed<S, LengthPrefixed>,
-    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>,
 }
 
 enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
@@ -28,15 +28,12 @@ enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     },
     Accepting {
         sending: Send<Framed<S, LengthPrefixed>>,
-        callback: Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>,
-    },
-    Wrapping {
-        wrapping: Box<Future<Item=R, Error=io::Error>>,
+        callback: Box<FnBox(FramedParts<S>) -> R>,
     },
 }
 
 pub struct Acceptor<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
-    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>,
+    protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>,
     state: AcceptorState<S, R>,
 }
 
@@ -84,7 +81,7 @@ fn negotiate<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static>(trans
         })
 }
 
-fn negotiate_all<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> impl Future<Item=R, Error=io::Error> {
+fn negotiate_all<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static>(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>) -> impl Future<Item=R, Error=io::Error> {
     stream::iter(protocols.into_iter().map(Ok))
         .fold(Err(transport), move |result, (protocol, callback)| -> Box<Future<Item=_, Error=_> + 'static> {
             match result {
@@ -92,7 +89,7 @@ fn negotiate_all<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R
                 Err(transport) => Box::new(negotiate(transport, protocol)
                     .and_then(move |(success, transport)| -> Box<Future<Item=_, Error=_> + 'static> {
                         if success {
-                            Box::new(callback(transport.into_parts()).map(Ok))
+                            Box::new(future::ok(Ok(callback(transport.into_parts()))))
                         } else {
                             Box::new(future::ok(Err(transport)))
                         }
@@ -109,7 +106,7 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> N
         Negotiator { initiator, transport, protocols }
     }
 
-    pub fn negotiate<F>(mut self, protocol: P, callback: F) -> Self where F: FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static {
+    pub fn negotiate<F>(mut self, protocol: P, callback: F) -> Self where F: FnBox(FramedParts<S>) -> R + 'static {
         self.protocols.push((protocol, Box::new(callback)));
         self
     }
@@ -129,7 +126,7 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> N
 }
 
 impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<P, S, R> {
-    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> Box<Future<Item=R, Error=io::Error>> + 'static>)>) -> Acceptor<P, S, R> {
+    fn new(transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>) -> Acceptor<P, S, R> {
         Acceptor {
             state: AcceptorState::Ready { transport },
             protocols: protocols,
@@ -147,9 +144,6 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> F
                 AcceptorState::Denying { ref mut sending } => {
                     let transport = try_ready!(sending.poll());
                     Some(AcceptorState::Ready { transport })
-                }
-                AcceptorState::Wrapping { ref mut wrapping } => {
-                    return wrapping.poll();
                 }
                 AcceptorState::Invalid => {
                     panic!("Acceptor future invalid")
@@ -207,9 +201,7 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> F
                 AcceptorState::Accepting { mut sending, callback } => {
                     match sending.poll()? {
                         Async::Ready(transport) => {
-                            self.state = AcceptorState::Wrapping {
-                                wrapping: callback(transport.into_parts()),
-                            };
+                            return Ok(Async::Ready(callback(transport.into_parts())));
                         }
                         Async::NotReady => {
                             self.state = AcceptorState::Accepting { sending, callback };
