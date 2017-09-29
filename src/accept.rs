@@ -5,7 +5,7 @@ use std::str;
 
 use bytes::Bytes;
 use futures::sink::Send;
-use futures::{Future, Stream, Sink, Poll, Async};
+use futures::{try_ready, Future, Stream, Sink, Poll, Async};
 use msgio::LengthPrefixed;
 use slog::Logger;
 use tokio_io::codec::{Framed, FramedParts};

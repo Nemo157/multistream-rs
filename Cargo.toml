@@ -5,9 +5,12 @@ version = "0.1.0"
 
 [dependencies]
 bytes = "0.4.4"
-futures = "*"
 slog = "2.0.12"
 tokio-io = "0.1.2"
 
 [dependencies.msgio]
 path = "../msgio-rs"
+
+[dependencies.futures-await]
+git = "https://github.com/Nemo157/futures-await"
+rev = "alternate-signatures"
