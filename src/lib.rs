@@ -10,5 +10,7 @@ extern crate tokio_io;
 extern crate slog;
 
 mod negotiator;
+mod propose;
+mod accept;
 
-pub use negotiator::*;
+pub use negotiator::Negotiator;
