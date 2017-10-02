@@ -51,7 +51,7 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> N
         self
     }
 
-    pub fn finish(self) -> impl Future<Item=R, Error=io::Error> {
+    pub fn finish(self) -> impl Future<Item=R, Error=io::Error> + 'static {
         let Negotiator { logger, initiator, transport, protocols } = self;
         send_header(logger.clone(), transport)
             .and_then(move |transport| {

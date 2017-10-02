@@ -2,6 +2,7 @@
 #![feature(fnbox)]
 #![feature(generators)]
 #![feature(proc_macro)]
+#![feature(never_type)]
 
 extern crate bytes;
 extern crate futures_await as futures;
