@@ -25,17 +25,21 @@ enum AcceptorState<S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     },
 }
 
-pub struct Acceptor<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
+struct Acceptor<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> {
     logger: Logger,
     protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>,
     state: AcceptorState<S, R>,
 }
 
-impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Acceptor<P, S, R> {
-    pub(crate) fn new(logger: Logger, transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>) -> Acceptor<P, S, R> {
-        let state = AcceptorState::Ready { transport };
-        Acceptor { logger, state, protocols }
-    }
+pub fn accept<P, S, R>(logger: Logger, transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>)
+    -> impl Future<Item=R, Error=io::Error> + 'static
+where
+    P: AsRef<str> + 'static,
+    S: AsyncRead + AsyncWrite + 'static,
+    R: 'static
+{
+    let state = AcceptorState::Ready { transport };
+    Acceptor { logger, state, protocols }
 }
 
 impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> Future for Acceptor<P, S, R> {

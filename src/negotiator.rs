@@ -9,7 +9,7 @@ use slog::Logger;
 use tokio_io::codec::{Framed, FramedParts};
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use accept::Acceptor;
+use accept::accept;
 use propose::propose_all;
 
 const PROTOCOL_ID: &'static str = "/multistream/1.0.0";
@@ -60,7 +60,7 @@ impl<P: AsRef<str> + 'static, S: AsyncRead + AsyncWrite + 'static, R: 'static> N
                     future::Either::A(propose_all(logger, transport, protocols))
                 } else {
                     debug!(logger, "Attempting to accept multistream");
-                    future::Either::B(Acceptor::new(logger, transport, protocols))
+                    future::Either::B(accept(logger, transport, protocols))
                 }
             })
     }
