@@ -1,4 +1,3 @@
-#![feature(conservative_impl_trait)]
 #![feature(fnbox)]
 #![feature(generators)]
 #![feature(proc_macro)]

@@ -3,7 +3,7 @@ use std::io;
 use std::str;
 
 use bytes::Bytes;
-use futures::{Future, Stream, Sink};
+use futures::{Stream, Sink};
 use futures::prelude::{async, await};
 use msgio::LengthPrefixed;
 use slog::Logger;
@@ -15,7 +15,7 @@ pub fn accept<P, S, R>(
     logger: Logger,
     mut transport: Framed<S, LengthPrefixed>,
     mut protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R>)>)
-    -> impl Future<Item=R, Error=io::Error> + 'static
+    -> Result<R, io::Error>
 where
     P: AsRef<str> + 'static,
     S: AsyncRead + AsyncWrite + 'static,

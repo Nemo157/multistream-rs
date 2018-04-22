@@ -12,7 +12,7 @@ use tokio_io::{AsyncRead, AsyncWrite};
 
 #[async]
 fn propose<P, S>(logger: Logger, transport: Framed<S, LengthPrefixed>, protocol: P)
-    -> impl Future<Item=(bool, Framed<S, LengthPrefixed>), Error=io::Error> + 'static
+    -> Result<(bool, Framed<S, LengthPrefixed>), io::Error>
 where
     P: AsRef<str> + 'static,
     S: AsyncRead + AsyncWrite + 'static
@@ -46,7 +46,7 @@ where
 
 #[async]
 pub fn propose_all<P, S, R>(logger: Logger, mut transport: Framed<S, LengthPrefixed>, protocols: Vec<(P, Box<FnBox(FramedParts<S>) -> R + 'static>)>)
-    -> impl Future<Item=R, Error=io::Error> + 'static
+    -> Result<R, io::Error>
 where
     P: AsRef<str> + 'static,
     S: AsyncRead + AsyncWrite + 'static,
